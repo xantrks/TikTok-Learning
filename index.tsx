@@ -22,6 +22,7 @@ interface TikTok {
 }
 
 // --- DOM Elements ---
+let ai: GoogleGenAI;
 const userInput = document.querySelector('#input') as HTMLTextAreaElement;
 const slideshow = document.querySelector('#slideshow') as HTMLDivElement;
 const error = document.querySelector('#error') as HTMLDivElement;
@@ -45,9 +46,14 @@ const voiceSelector = document.querySelector(
 const backgroundMusic = document.querySelector(
   '#background-music',
 ) as HTMLAudioElement;
+const apiKeyOverlay = document.querySelector(
+  '#api-key-overlay',
+) as HTMLDivElement;
 const apiKeyModal = document.querySelector('#api-key-modal') as HTMLDivElement;
-const apiKeyInput = document.querySelector('#api-key-input') as HTMLInputElement;
-const saveApiKeyBtn = document.querySelector('#save-api-key') as HTMLButtonElement;
+const apiKeyForm = document.querySelector('#api-key-form') as HTMLFormElement;
+const apiKeyInput = document.querySelector(
+  '#api-key-input',
+) as HTMLInputElement;
 
 // --- State Management ---
 let selectedCharacter = 'cat';
@@ -61,13 +67,11 @@ let musicHasStarted = false;
 let tiktokObserver: IntersectionObserver;
 let slideObserver: IntersectionObserver | null = null;
 let activeTikTokContainer: HTMLElement | null = null;
-let geminiAI: GoogleGenAI | null = null;
 
 // --- Initialization ---
 init();
 
 function init() {
-  checkApiKey();
   setupEventListeners();
   setupTikTokObserver();
   setupTheme();
@@ -76,53 +80,58 @@ function init() {
     loadVoices(); // Initial call
   }
   renderHistoryGallery();
+  checkApiKey();
 }
 
 // --- API Key Management ---
-
 function checkApiKey() {
-  const savedApiKey = localStorage.getItem('gemini-api-key');
-  if (savedApiKey) {
-    initializeAI(savedApiKey);
-    hideApiKeyModal();
+  const apiKey = process.env.API_KEY || sessionStorage.getItem('gemini-api-key');
+  if (apiKey) {
+    initializeGenAI(apiKey);
   } else {
     showApiKeyModal();
   }
 }
 
-function showApiKeyModal() {
-  if (apiKeyModal) {
-    apiKeyModal.removeAttribute('hidden');
+function initializeGenAI(apiKey: string) {
+  try {
+    ai = new GoogleGenAI({apiKey});
+    hideApiKeyModal();
+  } catch (e) {
+    console.error('Failed to initialize GoogleGenAI:', e);
+    showApiKeyModal();
+    const existingError = apiKeyModal.querySelector('.api-key-error');
+    if (existingError) existingError.remove();
+    const errorP = document.createElement('p');
+    errorP.className = 'api-key-error';
+    errorP.style.color = 'var(--primary-accent)';
+    errorP.style.marginTop = '10px';
+    errorP.textContent = `Initialization failed. Please check your API key.`;
+    apiKeyForm.insertAdjacentElement('afterend', errorP);
   }
-  apiKeyInput.focus();
+}
+
+function showApiKeyModal() {
+  apiKeyOverlay.removeAttribute('hidden');
+  apiKeyModal.removeAttribute('hidden');
+  generateBtn.disabled = true;
 }
 
 function hideApiKeyModal() {
+  apiKeyOverlay.setAttribute('hidden', 'true');
   apiKeyModal.setAttribute('hidden', 'true');
+  generateBtn.disabled = false;
 }
 
-function saveApiKey() {
+function handleApiKeySubmit(event: Event) {
+  event.preventDefault();
   const apiKey = apiKeyInput.value.trim();
-  if (!apiKey) {
-    alert('Please enter a valid API key');
-    return;
+  if (apiKey) {
+    const existingError = apiKeyModal.querySelector('.api-key-error');
+    if (existingError) existingError.remove();
+    sessionStorage.setItem('gemini-api-key', apiKey);
+    initializeGenAI(apiKey);
   }
-  
-  try {
-    // Test the API key by creating a GoogleGenAI instance
-    const testAI = new GoogleGenAI({apiKey});
-    localStorage.setItem('gemini-api-key', apiKey);
-    initializeAI(apiKey);
-    hideApiKeyModal();
-    apiKeyInput.value = '';
-  } catch (error) {
-    console.error('API key validation failed:', error);
-    alert('Invalid API key. Please check your key and try again.');
-  }
-}
-
-function initializeAI(apiKey: string) {
-  geminiAI = new GoogleGenAI({apiKey});
 }
 
 // --- Core Functions ---
@@ -219,6 +228,11 @@ function getInstructions(character: string): string {
 }
 
 async function generate() {
+  if (!ai) {
+    showApiKeyModal();
+    return;
+  }
+
   const message = userInput.value.trim();
   if (!message || isGenerating) return;
 
@@ -247,13 +261,9 @@ async function generate() {
       voiceName: selectedVoiceName, // Save the selected voice
     };
 
-    if (!geminiAI) {
-      throw new Error('Gemini AI not initialized. Please check your API key.');
-    }
-
     userInput.value = '';
     const instructions = getInstructions(selectedCharacter);
-    const chat = geminiAI.chats.create({
+    const chat = ai.chats.create({
       model: 'gemini-2.5-flash-image-preview',
       config: {responseModalities: [Modality.TEXT, Modality.IMAGE]},
     });
@@ -552,6 +562,8 @@ function updateThemeIcons(isLight: boolean) {
 // --- Event Listeners Setup ---
 
 function setupEventListeners() {
+  apiKeyForm.addEventListener('submit', handleApiKeySubmit);
+
   characterSelector.addEventListener('change', () => {
     selectedCharacter = characterSelector.value;
   });
@@ -559,18 +571,6 @@ function setupEventListeners() {
   voiceSelector.addEventListener('change', () => {
     selectedVoiceName = voiceSelector.value;
   });
-
-  if (saveApiKeyBtn) {
-    saveApiKeyBtn.addEventListener('click', saveApiKey);
-  }
-  
-  if (apiKeyInput) {
-    apiKeyInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        saveApiKey();
-      }
-    });
-  }
 
   slideshow.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;

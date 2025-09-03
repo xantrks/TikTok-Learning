@@ -85,7 +85,7 @@ function init() {
 
 // --- API Key Management ---
 function checkApiKey() {
-  const apiKey = process.env.API_KEY || sessionStorage.getItem('gemini-api-key');
+  const apiKey = sessionStorage.getItem('gemini-api-key');
   if (apiKey) {
     initializeGenAI(apiKey);
   } else {

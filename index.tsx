@@ -17,6 +17,7 @@ interface TikTok {
   slides: SlideData[];
   character: string;
   prompt: string;
+  voiceName: string; // Voice is now saved with the TikTok
   element?: HTMLElement;
 }
 
@@ -48,10 +49,9 @@ const backgroundMusic = document.querySelector(
 
 // --- State Management ---
 let selectedCharacter = 'cat';
-let selectedVoiceType = '';
+let selectedVoiceName = '';
 let voices: SpeechSynthesisVoice[] = [];
 let isPlaying = false;
-let isMuted = false;
 let isGenerating = false;
 let savedTikToks: TikTok[] = [];
 let speechKeepAliveInterval: number | undefined;
@@ -68,7 +68,6 @@ function init() {
   setupTikTokObserver();
   setupTheme();
   if ('speechSynthesis' in window) {
-    // Voices load asynchronously.
     window.speechSynthesis.onvoiceschanged = loadVoices;
     loadVoices(); // Initial call
   }
@@ -78,8 +77,17 @@ function init() {
 // --- Core Functions ---
 
 function loadVoices() {
-  voices = window.speechSynthesis.getVoices().filter((v) => v.lang.startsWith('en'));
-  voiceSelector.innerHTML = ''; // Clear existing options
+  const allEnglishVoices = window.speechSynthesis
+    .getVoices()
+    .filter((v) => v.lang.startsWith('en'));
+  const googleVoices = allEnglishVoices.filter((v) =>
+    v.name.includes('Google'),
+  );
+
+  const voicesToUse = googleVoices.length > 0 ? googleVoices : allEnglishVoices;
+  voices = voicesToUse;
+
+  voiceSelector.innerHTML = '';
 
   if (voices.length === 0) {
     const option = document.createElement('option');
@@ -89,11 +97,8 @@ function loadVoices() {
     return;
   }
 
-  // Find a good default voice (child-friendly, then female, then first)
   const defaultVoice =
-    voices.find((voice) => voice.name.includes('Child')) ||
-    voices.find((voice) => voice.name.includes('Female')) ||
-    voices[0];
+    voices.find((voice) => voice.name.includes('Female')) || voices[0];
 
   voices.forEach((voice) => {
     const option = document.createElement('option');
@@ -105,43 +110,38 @@ function loadVoices() {
     voiceSelector.append(option);
   });
 
-  // Set the initial selected voice state from the dropdown's current value
-  selectedVoiceType = voiceSelector.value;
+  selectedVoiceName = voiceSelector.value;
 }
 
-function speak(text: string, onEndCallback: () => void) {
+function speak(text: string, voiceName: string, onEndCallback: () => void) {
   if (!('speechSynthesis' in window)) return;
-  if (isMuted) {
-    const estimatedTime = text.split(' ').length * 300;
-    setTimeout(onEndCallback, estimatedTime);
-    return;
-  }
 
   window.speechSynthesis.cancel();
 
   const utterance = new SpeechSynthesisUtterance(text);
-  
-  // Find the selected voice by its name.
-  const voiceToUse = voices.find(v => v.name === selectedVoiceType);
+  const voiceToUse = voices.find((v) => v.name === voiceName);
 
-  // Use the found voice, or fallback to the first available English voice.
-  utterance.voice = voiceToUse || voices.find(v => v.lang.startsWith('en')) || voices[0];
+  utterance.voice =
+    voiceToUse || voices.find((v) => v.lang.startsWith('en')) || voices[0];
   utterance.pitch = 1.2;
   utterance.rate = 0.9;
   utterance.volume = 1;
   utterance.onend = onEndCallback;
   utterance.onerror = (event) => {
     console.error('SpeechSynthesisUtterance.onerror:', event.error);
-    if (event.error !== 'interrupted') stopSlideshow();
+    if (event.error !== 'interrupted') {
+      stopSlideshow();
+      onEndCallback(); // Ensure callbacks fire on error to prevent getting stuck
+    }
   };
   window.speechSynthesis.speak(utterance);
 }
 
 function getInstructions(character: string): string {
   const baseInstructions = `
-    Generate a 5 part explanation, with each part having one sentence of text and one image.
+    Generate a 6 part explanation, with each part having one sentence of text and one image.
     Keep sentences short, conversational, casual, and engaging for a child.
-    The response must have exactly 5 parts.
+    The response must have exactly 6 parts.
     Generate a cute, colorful, and simple illustration for each sentence.
     Do NOT include any text, words, or letters in the generated image itself.
     No commentary, just begin your explanation.`;
@@ -193,6 +193,7 @@ async function generate() {
       slides: [],
       character: selectedCharacter,
       prompt: message,
+      voiceName: selectedVoiceName, // Save the selected voice
     };
 
     userInput.value = '';
@@ -276,7 +277,6 @@ function addTikTokToFeed(tiktok: TikTok) {
   tiktokContainer.append(horizontalSlider);
   slideshow.append(tiktokContainer);
   tiktokObserver.observe(tiktokContainer);
-  // A bit of a hack to link the DOM element back to the data object
   tiktok.element = tiktokContainer;
 }
 
@@ -300,15 +300,6 @@ function createSlideElement(
     <div class="slide-actions">
       <button class="action-icon like-btn"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><span>Like</span></button>
       <button class="action-icon comment-btn"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2z"/></svg><span>Comment</span></button>
-      <button class="action-icon mute-btn">
-        <svg class="unmuted-icon" style="display: ${
-          isMuted ? 'none' : 'block'
-        }" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
-        <svg class="muted-icon" style="display: ${
-          isMuted ? 'block' : 'none'
-        }" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>
-        <span>${isMuted ? 'Unmute' : 'Mute'}</span>
-      </button>
       <button class="action-icon replay-btn"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg><span>Replay</span></button>
     </div>
     <div class="play-pause-overlay"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>
@@ -394,7 +385,11 @@ function navigateVertically(direction: 'up' | 'down') {
 
 // --- Playback Controls ---
 
-function playNextSlide(slider: HTMLElement, slideIndex: number) {
+function playNextSlide(
+  slider: HTMLElement,
+  slideIndex: number,
+  voiceName: string,
+) {
   if (!isPlaying || slideIndex >= slider.children.length) {
     stopSlideshow();
     return;
@@ -405,8 +400,8 @@ function playNextSlide(slider: HTMLElement, slideIndex: number) {
   if (caption?.textContent) {
     setTimeout(() => {
       if (!isPlaying) return;
-      speak(caption.textContent!.trim(), () => {
-        playNextSlide(slider, slideIndex + 1);
+      speak(caption.textContent!.trim(), voiceName, () => {
+        playNextSlide(slider, slideIndex + 1, voiceName);
       });
     }, 700);
   }
@@ -414,8 +409,10 @@ function playNextSlide(slider: HTMLElement, slideIndex: number) {
 
 function startSlideshow() {
   if (!activeTikTokContainer) return;
+  const tiktokId = activeTikTokContainer.dataset.tiktokId;
+  const tiktok = savedTikToks.find((t) => t.id === tiktokId);
   const slider = activeTikTokContainer.querySelector('.horizontal-slider');
-  if (!slider || slider.children.length === 0) return;
+  if (!slider || slider.children.length === 0 || !tiktok) return;
 
   isPlaying = true;
   document.body.classList.remove('slideshow-paused');
@@ -445,7 +442,7 @@ function startSlideshow() {
     {distance: Infinity, index: 0},
   );
 
-  playNextSlide(slider as HTMLElement, closestSlide.index);
+  playNextSlide(slider as HTMLElement, closestSlide.index, tiktok.voiceName);
 }
 
 function stopSlideshow() {
@@ -458,23 +455,6 @@ function stopSlideshow() {
       speechKeepAliveInterval = undefined;
     }
   }
-}
-
-function toggleMute() {
-  isMuted = !isMuted;
-  if (backgroundMusic) {
-    backgroundMusic.muted = isMuted;
-  }
-  document.querySelectorAll('.mute-btn').forEach((muteBtn) => {
-    (muteBtn.querySelector('.unmuted-icon') as SVGElement).style.display =
-      isMuted ? 'none' : 'block';
-    (muteBtn.querySelector('.muted-icon') as SVGElement).style.display = isMuted
-      ? 'block'
-      : 'none';
-    (muteBtn.querySelector('span') as HTMLSpanElement).textContent = isMuted
-      ? 'Unmute'
-      : 'Mute';
-  });
 }
 
 function handleReplay() {
@@ -493,7 +473,7 @@ function setupTheme() {
     document.body.classList.add('light-mode');
     updateThemeIcons(true);
   } else {
-    updateThemeIcons(false); // Default to dark
+    updateThemeIcons(false);
   }
 }
 
@@ -522,15 +502,17 @@ function setupEventListeners() {
   });
 
   voiceSelector.addEventListener('change', () => {
-    selectedVoiceType = voiceSelector.value;
+    selectedVoiceName = voiceSelector.value;
   });
 
   slideshow.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
-    if (target.closest('.mute-btn')) toggleMute();
-    else if (target.closest('.replay-btn')) handleReplay();
-    else if (!target.closest('.action-icon'))
+    const actionTarget = target.closest('.action-icon');
+    if (actionTarget?.classList.contains('replay-btn')) {
+      handleReplay();
+    } else if (!actionTarget) {
       isPlaying ? stopSlideshow() : startSlideshow();
+    }
   });
 
   generateBtn.addEventListener('click', generate);
@@ -539,7 +521,6 @@ function setupEventListeners() {
 
   examplesSelector.addEventListener('change', () => {
     if (examplesSelector.value) {
-      // Fix: Use examplesSelector.value instead of the undefined examples.value
       userInput.value = examplesSelector.value;
       generate();
       examplesSelector.selectedIndex = 0;

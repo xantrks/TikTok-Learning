@@ -22,7 +22,6 @@ interface TikTok {
 }
 
 // --- DOM Elements ---
-const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
 const userInput = document.querySelector('#input') as HTMLTextAreaElement;
 const slideshow = document.querySelector('#slideshow') as HTMLDivElement;
 const error = document.querySelector('#error') as HTMLDivElement;
@@ -92,7 +91,9 @@ function checkApiKey() {
 }
 
 function showApiKeyModal() {
-  apiKeyModal.removeAttribute('hidden');
+  if (apiKeyModal) {
+    apiKeyModal.removeAttribute('hidden');
+  }
   apiKeyInput.focus();
 }
 
@@ -108,12 +109,15 @@ function saveApiKey() {
   }
   
   try {
+    // Test the API key by creating a GoogleGenAI instance
+    const testAI = new GoogleGenAI({apiKey});
     localStorage.setItem('gemini-api-key', apiKey);
     initializeAI(apiKey);
     hideApiKeyModal();
     apiKeyInput.value = '';
   } catch (error) {
-    alert('Failed to save API key. Please try again.');
+    console.error('API key validation failed:', error);
+    alert('Invalid API key. Please check your key and try again.');
   }
 }
 
@@ -556,13 +560,17 @@ function setupEventListeners() {
     selectedVoiceName = voiceSelector.value;
   });
 
-  saveApiKeyBtn.addEventListener('click', saveApiKey);
+  if (saveApiKeyBtn) {
+    saveApiKeyBtn.addEventListener('click', saveApiKey);
+  }
   
-  apiKeyInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      saveApiKey();
-    }
-  });
+  if (apiKeyInput) {
+    apiKeyInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        saveApiKey();
+      }
+    });
+  }
 
   slideshow.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;

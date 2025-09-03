@@ -500,3 +500,145 @@ body.slideshow-paused .play-pause-overlay {
     height: calc(100vh - 61px); /* Full height minus header */
   }
 }
+
+/* API Key Modal */
+.api-key-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.8);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  backdrop-filter: blur(5px);
+}
+
+.api-key-modal-content {
+  background-color: var(--surface-color);
+  border-radius: 12px;
+  padding: 32px;
+  max-width: 480px;
+  width: 90%;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-color);
+}
+
+.api-key-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.api-key-header svg {
+  color: var(--primary-accent);
+  margin-bottom: 16px;
+}
+
+.api-key-header h2 {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--primary-text-color);
+}
+
+.api-key-header p {
+  color: var(--secondary-text-color);
+  font-size: 1rem;
+}
+
+.api-key-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.api-key-form label {
+  font-weight: 600;
+  color: var(--primary-text-color);
+  margin-bottom: 4px;
+}
+
+#api-key-input {
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: var(--background-color);
+  color: var(--primary-text-color);
+  font-family: var(--font-family);
+  font-size: 1rem;
+  transition: border-color 0.2s ease;
+}
+
+#api-key-input:focus {
+  outline: none;
+  border-color: var(--primary-accent);
+}
+
+.api-key-help {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.api-key-help p {
+  font-size: 0.9rem;
+  color: var(--secondary-text-color);
+  margin: 0;
+}
+
+.api-key-help a {
+  color: var(--primary-accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.api-key-help a:hover {
+  text-decoration: underline;
+}
+
+.help-text {
+  font-size: 0.8rem !important;
+  opacity: 0.8;
+}
+
+.api-key-actions {
+  margin-top: 8px;
+}
+
+.primary-btn {
+  width: 100%;
+  background-color: var(--primary-accent);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  font-family: var(--font-family);
+}
+
+.primary-btn:hover {
+  background-color: #e4224a;
+}
+
+.primary-btn:disabled {
+  background-color: #555;
+  color: #999;
+  cursor: not-allowed;
+}
+
+@media (max-width: 600px) {
+  .api-key-modal-content {
+    margin: 20px;
+    padding: 24px;
+  }
+  
+  .api-key-header h2 {
+    font-size: 1.5rem;
+  }
+}

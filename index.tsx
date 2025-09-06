@@ -3,13 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {GoogleGenAI, Modality} from '@google/genai';
+import {GoogleGenAI, Modality, Type} from '@google/genai';
 import {marked} from 'marked';
 
 // --- Interfaces ---
 interface SlideData {
-  text: string;
+  lyrics: string;
   imageSrc: string;
+}
+
+interface SongSlide {
+  lyrics: string;
+  image_prompt: string;
+}
+
+interface SongStructure {
+  slides: SongSlide[];
+  music_style: string;
 }
 
 interface TikTok {
@@ -17,7 +27,11 @@ interface TikTok {
   slides: SlideData[];
   character: string;
   prompt: string;
-  voiceName: string; // Voice is now saved with the TikTok
+  songSrc: string | null; // Null if using browser TTS
+  instrumentalSrc: string | null; // For ElevenLabs instrumental
+  instrumentalId: string | null; // For browser TTS fallback beats
+  useBrowserTTS: boolean;
+  voiceName?: string; // For browser TTS
   element?: HTMLElement;
 }
 
@@ -26,8 +40,11 @@ let ai: GoogleGenAI;
 const userInput = document.querySelector('#input') as HTMLTextAreaElement;
 const slideshow = document.querySelector('#slideshow') as HTMLDivElement;
 const error = document.querySelector('#error') as HTMLDivElement;
-const characterSelector = document.querySelector(
-  '#character-selector',
+const characterInput = document.querySelector(
+  '#character-input',
+) as HTMLInputElement;
+const voiceSelector = document.querySelector(
+  '#voice-selector',
 ) as HTMLSelectElement;
 const examplesSelector = document.querySelector(
   '#examples-selector',
@@ -40,206 +57,440 @@ const historyGallery = document.querySelector(
   '#history-gallery',
 ) as HTMLDivElement;
 const themeToggle = document.querySelector('#theme-toggle') as HTMLButtonElement;
-const voiceSelector = document.querySelector(
-  '#voice-selector',
-) as HTMLSelectElement;
-const backgroundMusic = document.querySelector(
-  '#background-music',
-) as HTMLAudioElement;
-const apiKeyOverlay = document.querySelector(
-  '#api-key-overlay',
-) as HTMLDivElement;
+
+// Modal Elements
+const modalOverlay = document.querySelector('#modal-overlay') as HTMLDivElement;
 const apiKeyModal = document.querySelector('#api-key-modal') as HTMLDivElement;
-const apiKeyForm = document.querySelector('#api-key-form') as HTMLFormElement;
-const apiKeyInput = document.querySelector(
-  '#api-key-input',
+const geminiApiKeyInput = document.querySelector(
+  '#gemini-api-key',
 ) as HTMLInputElement;
+const elevenLabsApiKeyInput = document.querySelector(
+  '#elevenlabs-api-key',
+) as HTMLInputElement;
+const saveApiKeysBtn = document.querySelector(
+  '#save-api-keys-btn',
+) as HTMLButtonElement;
+const closeApiKeyModalBtn = document.querySelector(
+  '#close-api-key-modal-btn',
+) as HTMLButtonElement;
+const addApiBtn = document.querySelector('#add-api-btn') as HTMLButtonElement;
+const errorModal = document.querySelector('#error-modal') as HTMLDivElement;
+const errorModalMessage = document.querySelector(
+  '#error-modal-message',
+) as HTMLParagraphElement;
+const closeErrorModalBtn = document.querySelector(
+  '#close-error-modal-btn',
+) as HTMLButtonElement;
+const geminiFormGroup = document.querySelector(
+  '#gemini-form-group',
+) as HTMLDivElement;
+const elevenLabsFormGroup = document.querySelector(
+  '#elevenlabs-form-group',
+) as HTMLDivElement;
+const apiModalMessage = document.querySelector(
+  '#api-modal-message',
+) as HTMLParagraphElement;
 
 // --- State Management ---
-let selectedCharacter = 'cat';
-let selectedVoiceName = '';
-let voices: SpeechSynthesisVoice[] = [];
 let isPlaying = false;
 let isGenerating = false;
 let savedTikToks: TikTok[] = [];
-let speechKeepAliveInterval: number | undefined;
-let musicHasStarted = false;
 let tiktokObserver: IntersectionObserver;
 let slideObserver: IntersectionObserver | null = null;
 let activeTikTokContainer: HTMLElement | null = null;
+let currentAudio: HTMLAudioElement | null = null;
+let currentInstrumentalAudio: HTMLAudioElement | null = null;
+let geminiApiKey: string | null = null;
+let elevenLabsApiKey: string | null = null;
+
+// --- Database Management ---
+const DB_NAME = 'TikTokForLearningDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'tiktoks';
+let db: IDBDatabase;
 
 // --- Initialization ---
 init();
 
-function init() {
-  setupEventListeners();
-  setupTikTokObserver();
-  setupTheme();
-  if ('speechSynthesis' in window) {
-    window.speechSynthesis.onvoiceschanged = loadVoices;
-    loadVoices(); // Initial call
+async function init() {
+  try {
+    await initDB();
+    loadApiKeys();
+    initializeGenAI();
+    await loadHistoryFromDB();
+    setupEventListeners();
+    setupTikTokObserver();
+    setupTheme();
+    populateVoices(); // Populate voices initially
+    speechSynthesis.onvoiceschanged = populateVoices; // and when they load
+  } catch (e) {
+    console.error('Initialization failed:', e);
+    showErrorPopup('Application failed to start. Could not access storage.');
   }
-  renderHistoryGallery();
-  checkApiKey();
+}
+
+// --- Data Persistence (IndexedDB) ---
+
+function initDB(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const dbInstance = request.result;
+      if (!dbInstance.objectStoreNames.contains(STORE_NAME)) {
+        dbInstance.createObjectStore(STORE_NAME, {keyPath: 'id'});
+      }
+    };
+
+    request.onsuccess = () => {
+      db = request.result;
+      resolve();
+    };
+
+    request.onerror = () => {
+      console.error('IndexedDB error:', request.error);
+      reject(new Error('Failed to open IndexedDB.'));
+    };
+  });
+}
+
+function saveTikTokToDB(tiktok: TikTok): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!db) {
+      reject(new Error('Database is not initialized.'));
+      return;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const {element, ...savableTikTok} = tiktok;
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.put(savableTikTok);
+
+    request.onsuccess = () => resolve();
+    request.onerror = () => {
+      console.error('Failed to save TikTok to DB:', request.error);
+      reject(request.error);
+    };
+  });
+}
+
+async function loadHistoryFromDB() {
+  if (!db) {
+    console.error('Database is not initialized.');
+    return;
+  }
+  const transaction = db.transaction(STORE_NAME, 'readonly');
+  const store = transaction.objectStore(STORE_NAME);
+  const request = store.getAll();
+
+  return new Promise<void>((resolve, reject) => {
+    request.onsuccess = () => {
+      const loadedTikToks = request.result as TikTok[];
+      // Sort by ID (timestamp) descending to get newest first
+      loadedTikToks.sort((a, b) => Number(b.id) - Number(a.id));
+      savedTikToks = loadedTikToks;
+
+      if (savedTikToks.length > 0) {
+        initialMessage.setAttribute('hidden', 'true');
+        slideshow.removeAttribute('hidden');
+        // Add to feed in reverse order of the now newest-first array,
+        // so that prepend() correctly places the newest item at the top.
+        [...savedTikToks].reverse().forEach(addTikTokToFeed);
+        renderHistoryGallery();
+      }
+      resolve();
+    };
+    request.onerror = () => {
+      console.error('Failed to load history from DB:', request.error);
+      reject(request.error);
+    };
+  });
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
 // --- API Key Management ---
-function checkApiKey() {
-  const apiKey = sessionStorage.getItem('gemini-api-key');
-  if (apiKey) {
-    initializeGenAI(apiKey);
+
+function loadApiKeys() {
+  geminiApiKey = localStorage.getItem('GEMINI_API_KEY');
+  elevenLabsApiKey = localStorage.getItem('ELEVENLABS_API_KEY');
+  if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
+  if (elevenLabsApiKey) elevenLabsApiKeyInput.value = elevenLabsApiKey;
+}
+
+function saveApiKeys() {
+  const geminiKey = geminiApiKeyInput.value.trim();
+  const elevenLabsKey = elevenLabsApiKeyInput.value.trim();
+
+  if (geminiKey) {
+    localStorage.setItem('GEMINI_API_KEY', geminiKey);
+    geminiApiKey = geminiKey;
+    initializeGenAI(); // Re-initialize with the new key
+  }
+  if (elevenLabsKey) {
+    localStorage.setItem('ELEVENLABS_API_KEY', elevenLabsKey);
+    elevenLabsApiKey = elevenLabsKey;
+  }
+  toggleApiKeyModal(false);
+}
+
+function initializeGenAI() {
+  if (geminiApiKey) {
+    try {
+      ai = new GoogleGenAI({apiKey: geminiApiKey});
+    } catch (e) {
+      ai = undefined;
+      showErrorPopup(`Failed to initialize Gemini Client: ${String(e)}`);
+    }
   } else {
-    showApiKeyModal();
+    ai = undefined;
   }
 }
 
-function initializeGenAI(apiKey: string) {
-  try {
-    ai = new GoogleGenAI({apiKey});
-    hideApiKeyModal();
-  } catch (e) {
-    console.error('Failed to initialize GoogleGenAI:', e);
-    showApiKeyModal();
-    const existingError = apiKeyModal.querySelector('.api-key-error');
-    if (existingError) existingError.remove();
-    const errorP = document.createElement('p');
-    errorP.className = 'api-key-error';
-    errorP.style.color = 'var(--primary-accent)';
-    errorP.style.marginTop = '10px';
-    errorP.textContent = `Initialization failed. Please check your API key.`;
-    apiKeyForm.insertAdjacentElement('afterend', errorP);
+// --- UI & Voice Population ---
+function populateVoices() {
+  const voices = speechSynthesis.getVoices();
+  const voiceGroup = document.querySelector(
+    '#browser-voices-group',
+  ) as HTMLOptGroupElement;
+  if (!voiceGroup) return;
+
+  voiceGroup.innerHTML = ''; // Clear existing voices
+  voices
+    .filter((voice) => voice.lang.startsWith('en')) // Filter for English voices
+    .forEach((voice) => {
+      const option = document.createElement('option');
+      option.value = voice.name;
+      option.textContent = `${voice.name} (${voice.lang})`;
+      voiceGroup.appendChild(option);
+    });
+}
+
+// --- Modal Controls ---
+function toggleApiKeyModal(show: boolean) {
+  modalOverlay.classList.toggle('hidden', !show);
+  apiKeyModal.classList.toggle('hidden', !show);
+}
+
+function showApiKeyModalWithContext(
+  requireGemini: boolean,
+  requireElevenLabs: boolean,
+) {
+  let message = 'Please enter your ';
+  const missingKeys = [];
+
+  geminiFormGroup.classList.toggle('hidden', !requireGemini);
+  if (requireGemini) {
+    missingKeys.push('Gemini API Key');
   }
-}
 
-function showApiKeyModal() {
-  apiKeyOverlay.removeAttribute('hidden');
-  apiKeyModal.removeAttribute('hidden');
-  generateBtn.disabled = true;
-}
-
-function hideApiKeyModal() {
-  apiKeyOverlay.setAttribute('hidden', 'true');
-  apiKeyModal.setAttribute('hidden', 'true');
-  generateBtn.disabled = false;
-}
-
-function handleApiKeySubmit(event: Event) {
-  event.preventDefault();
-  const apiKey = apiKeyInput.value.trim();
-  if (apiKey) {
-    const existingError = apiKeyModal.querySelector('.api-key-error');
-    if (existingError) existingError.remove();
-    sessionStorage.setItem('gemini-api-key', apiKey);
-    initializeGenAI(apiKey);
+  elevenLabsFormGroup.classList.toggle('hidden', !requireElevenLabs);
+  if (requireElevenLabs) {
+    missingKeys.push('ElevenLabs API Key');
   }
+
+  message += missingKeys.join(' and ');
+  message += ' to proceed.';
+
+  apiModalMessage.textContent = message;
+
+  toggleApiKeyModal(true);
 }
 
-// --- Core Functions ---
+function showErrorPopup(message: string) {
+  errorModalMessage.textContent = message;
+  modalOverlay.classList.remove('hidden');
+  errorModal.classList.remove('hidden');
+}
 
-function loadVoices() {
-  const allEnglishVoices = window.speechSynthesis
-    .getVoices()
-    .filter((v) => v.lang.startsWith('en'));
-  const googleVoices = allEnglishVoices.filter((v) =>
-    v.name.includes('Google'),
+function closeErrorPopup() {
+  modalOverlay.classList.add('hidden');
+  errorModal.classList.add('hidden');
+}
+
+// --- Core Generation Functions ---
+
+function selectBeatForStyle(style: string): string {
+  const lowerStyle = style.toLowerCase();
+  if (
+    lowerStyle.includes('upbeat') ||
+    lowerStyle.includes('pop') ||
+    lowerStyle.includes('happy') ||
+    lowerStyle.includes('rock')
+  ) {
+    return 'beat-upbeat';
+  } else if (
+    lowerStyle.includes('ballad') ||
+    lowerStyle.includes('gentle') ||
+    lowerStyle.includes('slow') ||
+    lowerStyle.includes('acoustic')
+  ) {
+    return 'beat-ballad';
+  } else if (
+    lowerStyle.includes('epic') ||
+    lowerStyle.includes('cinematic') ||
+    lowerStyle.includes('score')
+  ) {
+    return 'beat-epic';
+  }
+  return 'beat-upbeat'; // Default fallback
+}
+
+async function generateInstrumentalMusic(style: string): Promise<string> {
+  if (!elevenLabsApiKey) {
+    throw new Error('ElevenLabs API key is not set.');
+  }
+  const response = await fetch(
+    'https://api.elevenlabs.io/v1/sound-generation',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'xi-api-key': elevenLabsApiKey,
+      },
+      body: JSON.stringify({
+        text: style,
+        duration_seconds: 22, // Create a loopable track
+        prompt_influence: 0.7,
+      }),
+    },
+  );
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`ElevenLabs Music API error: ${errorText}`);
+  }
+  const audioBlob = await response.blob();
+  return blobToBase64(audioBlob);
+}
+
+async function generateAudioFromText(text: string): Promise<string> {
+  if (!elevenLabsApiKey) {
+    throw new Error('ElevenLabs API key is not set.');
+  }
+  // A good voice for singing and storytelling.
+  const VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'xi-api-key': elevenLabsApiKey,
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: 'eleven_multilingual_v2',
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75,
+          style: 0.5,
+          use_speaker_boost: true,
+        },
+      }),
+    },
   );
 
-  const voicesToUse = googleVoices.length > 0 ? googleVoices : allEnglishVoices;
-  voices = voicesToUse;
-
-  voiceSelector.innerHTML = '';
-
-  if (voices.length === 0) {
-    const option = document.createElement('option');
-    option.textContent = 'No voices available';
-    option.disabled = true;
-    voiceSelector.append(option);
-    return;
+  if (!response.ok) {
+    const errorText = await response.text();
+    const errorJson = JSON.parse(errorText);
+    if (errorJson?.detail?.status === 'invalid_api_key') {
+      throw new Error('invalid_api_key');
+    }
+    throw new Error(`ElevenLabs TTS API error: ${errorText}`);
   }
 
-  const defaultVoice =
-    voices.find((voice) => voice.name.includes('Female')) || voices[0];
+  const audioBlob = await response.blob();
+  return blobToBase64(audioBlob);
+}
 
-  voices.forEach((voice) => {
-    const option = document.createElement('option');
-    option.value = voice.name;
-    option.textContent = `${voice.name} (${voice.lang})`;
-    if (voice.name === defaultVoice.name) {
-      option.selected = true;
-    }
-    voiceSelector.append(option);
+async function generateImageFromPrompt(prompt: string): Promise<string> {
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash-image-preview',
+    contents: {
+      parts: [{text: `A 9:16 aspect ratio image of: ${prompt}`}],
+    },
+    config: {
+      responseModalities: [Modality.IMAGE, Modality.TEXT],
+    },
   });
 
-  selectedVoiceName = voiceSelector.value;
-}
-
-function speak(text: string, voiceName: string, onEndCallback: () => void) {
-  if (!('speechSynthesis' in window)) return;
-
-  window.speechSynthesis.cancel();
-
-  const utterance = new SpeechSynthesisUtterance(text);
-  const voiceToUse = voices.find((v) => v.name === voiceName);
-
-  utterance.voice =
-    voiceToUse || voices.find((v) => v.lang.startsWith('en')) || voices[0];
-  utterance.pitch = 1.2;
-  utterance.rate = 0.9;
-  utterance.volume = 1;
-  utterance.onend = onEndCallback;
-  utterance.onerror = (event) => {
-    console.error('SpeechSynthesisUtterance.onerror:', event.error);
-    if (event.error !== 'interrupted') {
-      stopSlideshow();
-      onEndCallback(); // Ensure callbacks fire on error to prevent getting stuck
+  for (const part of response.candidates[0].content.parts) {
+    if (part.inlineData && part.inlineData.data) {
+      const base64ImageBytes: string = part.inlineData.data;
+      return `data:${part.inlineData.mimeType};base64,${base64ImageBytes}`;
     }
-  };
-  window.speechSynthesis.speak(utterance);
+  }
+
+  throw new Error('Image generation failed. The model did not return an image.');
 }
 
-function getInstructions(character: string): string {
+function getInstructionsForSong(character: string): string {
   const baseInstructions = `
-    Generate a 6 part explanation, with each part having one sentence of text and one image.
-    Keep sentences short, conversational, casual, and engaging for a child.
-    The response must have exactly 6 parts.
-    Generate a cute, colorful, and simple illustration for each sentence.
-    Do NOT include any text, words, or letters in the generated image itself.
-    No commentary, just begin your explanation.`;
+    You are a creative songwriter and visual artist.
+    Your task is to create a short, catchy, and simple song that explains the user's query.
+    The song must be from the perspective of the specified character.
+    Generate a response in JSON format.
+    The JSON object must contain two keys:
+    1. "slides": An array of slide objects, where each slide contains a short line of "lyrics" and a corresponding descriptive "image_prompt" for an illustration to match that line.
+    2. "music_style": A short string describing the musical style of the song (e.g., "upbeat pop", "gentle acoustic ballad", "epic cinematic score").
+    Do NOT include any text, words, or letters in the image prompt itself.
+    The song should have between 6 and 8 slides.
+    No commentary, just the JSON object.`;
 
-  switch (character) {
-    case 'dog':
-      return `Use a fun story about a pack of friendly, loyal dogs as a metaphor. ${baseInstructions}`;
-    case 'spiderman':
-      return `Explain it from the perspective of Spider-Man, using concepts like web-slinging, spider-sense, and great responsibility as metaphors. ${baseInstructions}`;
-    case 'doraemon':
-      return `Explain it from the perspective of Doraemon, using his futuristic gadgets from the 22nd century as metaphors. ${baseInstructions}`;
+  const emojiRegex = /^\p{Emoji}\s*/u;
+  const logicName = character.replace(emojiRegex, '').trim();
+  const characterNameForPrompt =
+    logicName.charAt(0).toUpperCase() + logicName.slice(1);
+
+  let characterSpecifics = '';
+  switch (logicName.toLowerCase()) {
+    case 'spider-man':
+      characterSpecifics =
+        'Use concepts like web-slinging, spider-sense, and great responsibility in the lyrics.';
+      break;
     case 'barbie':
-      return `Explain it from the perspective of Barbie, using fashion, friendship, and her careers as metaphors. ${baseInstructions}`;
+      characterSpecifics =
+        'Use themes of fashion, friendship, and her many careers in the lyrics.';
+      break;
     case 'simba':
-      return `Explain it from the perspective of Simba from The Lion King, using the circle of life, the pride lands, and his jungle friends as metaphors. ${baseInstructions}`;
-    case 'ironman':
-      return `Explain it from the perspective of Tony Stark (Iron Man), using advanced technology, engineering, and his suit's gadgets as metaphors. ${baseInstructions}`;
-    case 'steve':
-      return `Explain it from the perspective of Steve from Minecraft, using concepts like crafting, building with blocks, mining, and exploring the world as metaphors. ${baseInstructions}`;
-    case 'cat':
+      characterSpecifics =
+        'Use themes of the circle of life, the pride lands, and his jungle friends in the lyrics.';
+      break;
     default:
-      return `Use a fun story about lots of tiny, curious cats as a metaphor. ${baseInstructions}`;
+      characterSpecifics = `Incorporate ${characterNameForPrompt}'s unique personality, skills, and famous concepts into the lyrics.`;
   }
+
+  return `${baseInstructions} ${characterSpecifics}`;
 }
 
 async function generate() {
-  if (!ai) {
-    showApiKeyModal();
+  const message = userInput.value.trim();
+  const voiceChoice = voiceSelector.value;
+  if (!message || isGenerating) return;
+
+  // --- Intelligent API Key Check ---
+  const isGeminiKeyMissing = !geminiApiKey;
+  const isElevenLabsKeyNeeded = voiceChoice === 'elevenlabs';
+  const isElevenLabsKeyMissing = isElevenLabsKeyNeeded && !elevenLabsApiKey;
+
+  if (isGeminiKeyMissing || isElevenLabsKeyMissing) {
+    showApiKeyModalWithContext(isGeminiKeyMissing, isElevenLabsKeyMissing);
     return;
   }
 
-  const message = userInput.value.trim();
-  if (!message || isGenerating) return;
-
-  if (!musicHasStarted && backgroundMusic) {
-    backgroundMusic.volume = 0.2;
-    backgroundMusic.play().catch((e) => console.error('Audio play failed:', e));
-    musicHasStarted = true;
+  if (!ai) {
+    showErrorPopup(
+      'The Gemini client is not initialized. Please check your API key.',
+    );
+    toggleApiKeyModal(true);
+    return;
   }
 
   isGenerating = true;
@@ -253,54 +504,117 @@ async function generate() {
   slideshow.removeAttribute('hidden');
 
   try {
+    const finalCharacter = characterInput.value.trim();
+    if (!finalCharacter) {
+      showErrorPopup('Please enter or select a narrator.');
+      return;
+    }
+
+    const instructions = getInstructionsForSong(finalCharacter);
+
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `${message}\n${instructions}`,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            slides: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  lyrics: {type: Type.STRING},
+                  image_prompt: {type: Type.STRING},
+                },
+              },
+            },
+            music_style: {type: Type.STRING},
+          },
+        },
+      },
+    });
+
+    const songData = JSON.parse(result.text) as SongStructure;
+    if (!songData || !songData.slides || songData.slides.length === 0) {
+      throw new Error('Could not generate song structure from model.');
+    }
+    const songStructure = songData.slides;
+    const musicStyle = songData.music_style || 'a catchy song';
+    const allLyricsText = songStructure.map((s) => s.lyrics).join('\n');
+    const imagePrompts = songStructure.map((s) => s.image_prompt);
+
+    let songSrc: string | null = null;
+    let instrumentalSrc: string | null = null;
+    let instrumentalId: string | null = null;
+    let useBrowserTTS = false;
+    let images: string[] = [];
+
+    // --- Audio Generation Step ---
+    if (voiceChoice === 'elevenlabs') {
+      try {
+        const [vocalSrc, instrumental] = await Promise.all([
+          generateAudioFromText(allLyricsText),
+          generateInstrumentalMusic(musicStyle),
+        ]);
+        songSrc = vocalSrc;
+        instrumentalSrc = instrumental;
+      } catch (elevenLabsError) {
+        if (String(elevenLabsError).includes('invalid_api_key')) {
+          throw elevenLabsError; // Re-throw to be caught by the main try-catch
+        }
+        showErrorPopup(
+          `ElevenLabs failed to generate audio: ${String(elevenLabsError)}. Please try again or switch to the 'Browser Voice' narrator.`,
+        );
+        return; // Stop generation
+      }
+    } else {
+      useBrowserTTS = true;
+      instrumentalId = selectBeatForStyle(musicStyle);
+    }
+
+    // --- Image Generation Step ---
+    try {
+      images = await Promise.all(
+        imagePrompts.map((prompt) => generateImageFromPrompt(prompt)),
+      );
+    } catch (imageError) {
+      showErrorPopup(
+        `Failed to generate images: ${String(imageError)}. Please try again.`,
+      );
+      return; // Stop generation
+    }
+
     const newTikTok: TikTok = {
       id: Date.now().toString(),
-      slides: [],
-      character: selectedCharacter,
+      slides: songStructure.map((part, index) => ({
+        lyrics: part.lyrics,
+        imageSrc: images[index],
+      })),
+      character: finalCharacter,
       prompt: message,
-      voiceName: selectedVoiceName, // Save the selected voice
+      songSrc: songSrc,
+      instrumentalSrc: instrumentalSrc,
+      instrumentalId: instrumentalId,
+      useBrowserTTS: useBrowserTTS,
+      voiceName: useBrowserTTS ? voiceChoice : undefined,
     };
 
-    userInput.value = '';
-    const instructions = getInstructions(selectedCharacter);
-    const chat = ai.chats.create({
-      model: 'gemini-2.5-flash-image-preview',
-      config: {responseModalities: [Modality.TEXT, Modality.IMAGE]},
-    });
-    const result = await chat.sendMessageStream({
-      message: `${message}\n${instructions}`,
-    });
-
-    let text = '';
-    let imgData = '';
-
-    for await (const chunk of result) {
-      for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
-        if (part.text) {
-          text += part.text;
-        } else if (part.inlineData?.data) {
-          imgData = `data:image/png;base64,${part.inlineData.data}`;
-        }
-        if (text && imgData && newTikTok.slides.length < 5) {
-          newTikTok.slides.push({text, imageSrc: imgData});
-          text = '';
-          imgData = '';
-        }
-      }
-    }
-    if (text && imgData && newTikTok.slides.length < 5) {
-      newTikTok.slides.push({text, imageSrc: imgData});
-    }
-
     if (newTikTok.slides.length > 0) {
-      saveAndRenderNewTikTok(newTikTok);
+      await saveAndRenderNewTikTok(newTikTok);
     } else {
       throw new Error('No content was generated. Please try again.');
     }
   } catch (e) {
     const msg = String(e);
-    error.innerHTML = `Something went wrong: ${msg}`;
-    error.removeAttribute('hidden');
+    if (msg.includes('invalid_api_key')) {
+      showErrorPopup(
+        'Your ElevenLabs API key is invalid. Please click the "Add API" button in the top right to enter a valid key.',
+      );
+    } else {
+      showErrorPopup(`Something went wrong: ${msg}`);
+    }
     if (slideshow.children.length === 0) {
       slideshow.setAttribute('hidden', 'true');
       initialMessage.removeAttribute('hidden');
@@ -315,11 +629,22 @@ async function generate() {
 
 // --- Rendering & DOM Manipulation ---
 
-function saveAndRenderNewTikTok(tiktok: TikTok) {
-  savedTikToks.push(tiktok);
-  renderHistoryGallery();
-  addTikTokToFeed(tiktok);
-  tiktok.element?.scrollIntoView({behavior: 'smooth'});
+async function saveAndRenderNewTikTok(tiktok: TikTok) {
+  try {
+    // Add to the beginning of the in-memory array (newest-first)
+    savedTikToks.unshift(tiktok);
+    await saveTikTokToDB(tiktok);
+    addTikTokToFeed(tiktok);
+    renderHistoryGallery();
+    // Scroll the main feed to the top to show the new video
+    slideshow.scrollTo({top: 0, behavior: 'smooth'});
+  } catch (e) {
+    savedTikToks.shift(); // Remove from memory if save fails
+    console.error('Failed to save TikTok:', e);
+    showErrorPopup(
+      'Failed to save your new TikTok. Storage might be full or corrupted.',
+    );
+  }
 }
 
 function addTikTokToFeed(tiktok: TikTok) {
@@ -340,7 +665,8 @@ function addTikTokToFeed(tiktok: TikTok) {
   }
 
   tiktokContainer.append(horizontalSlider);
-  slideshow.append(tiktokContainer);
+  // Prepend to show the newest video at the top of the feed
+  slideshow.prepend(tiktokContainer);
   tiktokObserver.observe(tiktokContainer);
   tiktok.element = tiktokContainer;
 }
@@ -357,10 +683,10 @@ function createSlideElement(
     <img src="${slideData.imageSrc}" alt="Generated illustration">
     <div class="slide-content">
        <div class="slide-prompt">
-        <span class="creator-name">@${characterName}</span>
+        <span class="creator-name">${characterName}</span>
         ${prompt}
       </div>
-      <div class="slide-answer">${marked.parse(slideData.text)}</div>
+      <div class="slide-answer">${marked.parse(slideData.lyrics)}</div>
     </div>
     <div class="slide-actions">
       <button class="action-icon like-btn"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><span>Like</span></button>
@@ -378,6 +704,7 @@ function renderHistoryGallery() {
     historyGallery.innerHTML = `<p class="gallery-placeholder">Saved TikToks will appear here.</p>`;
     return;
   }
+  // The savedTikToks array is already sorted newest-first.
   for (const tiktok of savedTikToks) {
     const thumb = document.createElement('div');
     thumb.className = 'gallery-thumbnail';
@@ -449,76 +776,147 @@ function navigateVertically(direction: 'up' | 'down') {
 }
 
 // --- Playback Controls ---
-
-function playNextSlide(
-  slider: HTMLElement,
-  slideIndex: number,
-  voiceName: string,
-) {
-  if (!isPlaying || slideIndex >= slider.children.length) {
-    stopSlideshow();
-    return;
-  }
-  const currentSlide = slider.children[slideIndex] as HTMLElement;
-  currentSlide.scrollIntoView({behavior: 'smooth'});
-  const caption = currentSlide.querySelector('.slide-answer p');
-  if (caption?.textContent) {
-    setTimeout(() => {
-      if (!isPlaying) return;
-      speak(caption.textContent!.trim(), voiceName, () => {
-        playNextSlide(slider, slideIndex + 1, voiceName);
-      });
-    }, 700);
-  }
-}
-
 function startSlideshow() {
   if (!activeTikTokContainer) return;
   const tiktokId = activeTikTokContainer.dataset.tiktokId;
   const tiktok = savedTikToks.find((t) => t.id === tiktokId);
-  const slider = activeTikTokContainer.querySelector('.horizontal-slider');
+  const slider = activeTikTokContainer.querySelector(
+    '.horizontal-slider',
+  ) as HTMLElement;
   if (!slider || slider.children.length === 0 || !tiktok) return;
+
+  stopSlideshow();
 
   isPlaying = true;
   document.body.classList.remove('slideshow-paused');
 
-  if ('speechSynthesis' in window) {
-    if (speechKeepAliveInterval) clearInterval(speechKeepAliveInterval);
-    speechKeepAliveInterval = window.setInterval(
-      () =>
-        window.speechSynthesis.speaking
-          ? window.speechSynthesis.resume()
-          : window.speechSynthesis.pause(),
-      5000,
-    );
+  // Set up instrumental track (common for both modes)
+  if (tiktok.instrumentalId) {
+    const instrumentalEl = document.querySelector(
+      `#${tiktok.instrumentalId}`,
+    ) as HTMLAudioElement;
+    if (instrumentalEl) {
+      currentInstrumentalAudio = instrumentalEl;
+      currentInstrumentalAudio.currentTime = 0;
+      currentInstrumentalAudio.volume = 0.2; // Quieter for browser TTS
+      currentInstrumentalAudio.load(); // Ensure it's ready
+      currentInstrumentalAudio.play().catch((e) => {
+        showErrorPopup(`Instrumental playback failed:\n${e.message}`);
+      });
+    }
+  } else if (tiktok.instrumentalSrc) {
+    currentInstrumentalAudio = new Audio(tiktok.instrumentalSrc);
+    currentInstrumentalAudio.loop = true;
+    currentInstrumentalAudio.volume = 0.4;
+    currentInstrumentalAudio.play().catch((e) => {
+      showErrorPopup(`Instrumental playback failed:\n${e.message}`);
+    });
   }
 
-  const slides = Array.from(slider.children);
-  const viewportCenter =
-    slider.getBoundingClientRect().left + slider.clientWidth / 2;
-  const closestSlide = slides.reduce(
-    (closest, slide, index) => {
-      const {left, right} = slide.getBoundingClientRect();
-      const slideCenter = left + (right - left) / 2;
-      const distance = Math.abs(viewportCenter - slideCenter);
-      if (distance < closest.distance) return {distance, index};
-      return closest;
-    },
-    {distance: Infinity, index: 0},
-  );
+  if (tiktok.useBrowserTTS) {
+    // --- Browser TTS Playback Logic ---
+    let currentSlideIndex = 0;
+    const speakAndAdvance = () => {
+      if (currentSlideIndex >= tiktok.slides.length || !isPlaying) {
+        stopSlideshow();
+        return;
+      }
 
-  playNextSlide(slider as HTMLElement, closestSlide.index, tiktok.voiceName);
+      const slide = slider.children[currentSlideIndex] as HTMLElement;
+      slide?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+        inline: 'start',
+      });
+
+      const lyrics = tiktok.slides[currentSlideIndex].lyrics;
+      if (!lyrics?.trim()) {
+        currentSlideIndex++;
+        speakAndAdvance();
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(lyrics);
+
+      // Find and set the selected voice
+      if (tiktok.voiceName) {
+        const voices = speechSynthesis.getVoices();
+        const selectedVoice = voices.find(
+          (voice) => voice.name === tiktok.voiceName,
+        );
+        if (selectedVoice) {
+          utterance.voice = selectedVoice;
+        }
+      }
+
+      utterance.onend = () => {
+        currentSlideIndex++;
+        speakAndAdvance();
+      };
+      utterance.onerror = (e) => {
+        console.error('SpeechSynthesis Error:', e);
+        showErrorPopup(`Speech synthesis failed: ${e.error}`);
+        stopSlideshow();
+      };
+      speechSynthesis.speak(utterance);
+    };
+    speakAndAdvance();
+  } else if (tiktok.songSrc) {
+    // --- ElevenLabs Audio File Playback Logic ---
+    currentAudio = new Audio(tiktok.songSrc);
+    currentAudio.play().catch((e) => {
+      showErrorPopup(`Vocal playback failed:\n${e.message}`);
+      stopSlideshow();
+    });
+    currentAudio.onended = () => stopSlideshow();
+    // FIX: Use the 'error' property of the audio element for a more descriptive message,
+    // and to resolve the type error on the event object.
+    currentAudio.onerror = () => {
+      const audioError = currentAudio?.error;
+      const errorMessage = audioError
+        ? `${audioError.message} (code: ${audioError.code})`
+        : 'An unknown error occurred.';
+      showErrorPopup(`Vocal playback failed:\n${errorMessage}`);
+      stopSlideshow();
+    };
+
+    let lastSlideIndex = -1;
+    currentAudio.addEventListener('timeupdate', () => {
+      if (!currentAudio || currentAudio.paused || !currentAudio.duration)
+        return;
+      const slideDuration = currentAudio.duration / tiktok.slides.length;
+      const currentSlideIndex = Math.floor(
+        currentAudio.currentTime / slideDuration,
+      );
+
+      if (
+        currentSlideIndex !== lastSlideIndex &&
+        currentSlideIndex < tiktok.slides.length
+      ) {
+        const currentSlide = slider.children[currentSlideIndex] as HTMLElement;
+        currentSlide?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'nearest',
+          inline: 'start',
+        });
+        lastSlideIndex = currentSlideIndex;
+      }
+    });
+  }
 }
 
 function stopSlideshow() {
   isPlaying = false;
   document.body.classList.add('slideshow-paused');
-  if ('speechSynthesis' in window) {
-    window.speechSynthesis.cancel();
-    if (speechKeepAliveInterval) {
-      clearInterval(speechKeepAliveInterval);
-      speechKeepAliveInterval = undefined;
-    }
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
+  }
+  if (currentInstrumentalAudio) {
+    currentInstrumentalAudio.pause();
+    currentInstrumentalAudio = null;
+  }
+  if (speechSynthesis.speaking) {
+    speechSynthesis.cancel();
   }
 }
 
@@ -562,16 +960,6 @@ function updateThemeIcons(isLight: boolean) {
 // --- Event Listeners Setup ---
 
 function setupEventListeners() {
-  apiKeyForm.addEventListener('submit', handleApiKeySubmit);
-
-  characterSelector.addEventListener('change', () => {
-    selectedCharacter = characterSelector.value;
-  });
-
-  voiceSelector.addEventListener('change', () => {
-    selectedVoiceName = voiceSelector.value;
-  });
-
   slideshow.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     const actionTarget = target.closest('.action-icon');
@@ -585,6 +973,15 @@ function setupEventListeners() {
   generateBtn.addEventListener('click', generate);
 
   themeToggle.addEventListener('click', toggleTheme);
+
+  addApiBtn.addEventListener('click', () => toggleApiKeyModal(true));
+  closeApiKeyModalBtn.addEventListener('click', () => toggleApiKeyModal(false));
+  modalOverlay.addEventListener('click', () => {
+    toggleApiKeyModal(false);
+    closeErrorPopup();
+  });
+  saveApiKeysBtn.addEventListener('click', saveApiKeys);
+  closeErrorModalBtn.addEventListener('click', closeErrorPopup);
 
   examplesSelector.addEventListener('change', () => {
     if (examplesSelector.value) {
@@ -605,7 +1002,7 @@ function setupEventListeners() {
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.target === userInput) return;
+    if (e.target === userInput || e.target === characterInput) return;
     if (e.key === 'ArrowDown') navigateVertically('down');
     else if (e.key === 'ArrowUp') navigateVertically('up');
   });
